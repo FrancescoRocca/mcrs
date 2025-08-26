@@ -1,3 +1,7 @@
+use std::{io::Write, net::TcpStream};
+
+use crate::json;
+
 pub enum ClientIntent {
     Status,
     Login,
@@ -16,7 +20,7 @@ pub struct Packet {
 }
 
 impl Packet {
-    pub fn parse(data: &[u8]) -> Self {
+    pub fn parse(stream: &mut TcpStream, data: &[u8]) -> Self {
         print_hex(data);
         let mut offset = 0;
 
@@ -31,7 +35,23 @@ impl Packet {
         match packet_id {
             0x00 => {
                 println!("[debug] Handshake");
-                parse_handshake(&data[offset..])
+                let packet = parse_handshake(&data[offset..]);
+
+                println!("[debug] Sending response...");
+                let status =
+                    json::Status::new("1.21.8", packet.protocol_version(), 20, 0, "Hello, World!");
+                let status_json = status.json();
+
+                let packet_len = write_varint(
+                    varint_size(status_json.len() as u32) + 1 + status_json.len() as u32,
+                );
+                stream.write_all(&packet_len).unwrap();
+                stream.write_all(&[0x00]).unwrap();
+                let status_len = write_varint(status_json.len() as u32);
+                stream.write_all(&status_len).unwrap();
+                stream.write_all(status_json.as_bytes()).unwrap();
+
+                packet
             }
             _ => {
                 println!("[debug] Not implemented");
@@ -96,12 +116,47 @@ fn read_varint(data: &[u8]) -> (u32, usize) {
     (value, offset)
 }
 
+fn varint_size(mut value: u32) -> u32 {
+    let mut size = 0;
+
+    loop {
+        value >>= 7;
+        size += 1;
+
+        if value == 0 {
+            break;
+        }
+    }
+
+    size
+}
+
+fn write_varint(mut value: u32) -> Vec<u8> {
+    let mut buffer = Vec::new();
+
+    loop {
+        let mut tmp: u8 = (value & SEGMENT_BITS as u32) as u8;
+        value >>= 7;
+
+        if value != 0 {
+            tmp |= CONTINUE_BIT;
+        }
+
+        buffer.push(tmp);
+
+        if value == 0 {
+            break;
+        }
+    }
+
+    buffer
+}
+
 fn parse_handshake(data: &[u8]) -> Packet {
     let mut offset = 0;
 
     let (protocol_version, off) = read_varint(data);
     offset += off;
-    println!("Proto v: {protocol_version}");
 
     let (address_len, off) = read_varint(&data[offset..]);
     offset += off;

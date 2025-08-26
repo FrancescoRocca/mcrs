@@ -1,11 +1,10 @@
 use std::{
-    collections::HashMap,
     io::Read,
     net::{TcpListener, TcpStream},
-    os::fd::{AsFd, AsRawFd},
+    os::fd::AsRawFd,
 };
 
-use crate::packets::{self, ClientIntent};
+use crate::packets::{self};
 
 pub struct Server {
     host: String,
@@ -29,7 +28,7 @@ impl Server {
         let mut buffer: Vec<u8> = vec![0u8; 1024];
         let n = stream.read(&mut buffer).unwrap();
         println!("Read {n} bytes");
-        let packet = packets::Packet::parse(&buffer[..n]);
+        let packet = packets::Packet::parse(&mut stream, &buffer[..n]);
 
         println!(
             "{}:{} (proto v:{}, intent: {})",
@@ -42,17 +41,18 @@ impl Server {
 
     pub fn run(&self) {
         let listener = TcpListener::bind(format!("{}:{}", self.host, self.port)).unwrap();
-        //let mut clients: HashMap<i32, ClientIntent> = HashMap::new();
 
         /* Accept connections and process them */
-        match listener.accept() {
-            Ok((socket, addr)) => {
-                let client_fd = socket.as_raw_fd();
-                println!("Socket: {}, Addr: {}", client_fd, addr);
-                self.handle_client(socket);
-            }
-            Err(e) => {
-                println!("Couldn't get client: {e:?}");
+        loop {
+            match listener.accept() {
+                Ok((socket, addr)) => {
+                    let client_fd = socket.as_raw_fd();
+                    println!("Socket: {}, Addr: {}", client_fd, addr);
+                    self.handle_client(socket);
+                }
+                Err(e) => {
+                    println!("Couldn't get client: {e:?}");
+                }
             }
         }
     }
