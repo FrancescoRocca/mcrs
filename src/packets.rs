@@ -1,69 +1,31 @@
-use mio::net::TcpStream;
 use std::io::Write;
 
-use crate::json;
+use crate::{json, server::MinecraftConnection};
 
+#[derive(Clone)]
 pub enum ClientIntent {
-    Status,
-    Login,
-    Transfer,
-    Error,
+    Status = 0,
+    Login = 1,
+    Transfer = 2,
+    Error = 4,
 }
 
 const SEGMENT_BITS: u8 = 0x7F;
 const CONTINUE_BIT: u8 = 0x80;
 
+#[derive(Clone)]
 pub struct Packet {
+    id: u32,
     protocol_version: u32,
     server_address: String,
     server_port: u16,
     intent: ClientIntent,
+    length: usize,
 }
 
 impl Packet {
-    pub fn parse(stream: &mut TcpStream, data: &[u8]) -> Self {
-        print_hex(data);
-        let mut offset = 0;
-
-        let (length, off) = read_varint(data);
-        println!("[debug] Packet len: {length}");
-        offset += off;
-
-        let (packet_id, off) = read_varint(&data[offset..]);
-        println!("[debug] Packet id: {:#x}", packet_id);
-        offset += off;
-
-        match packet_id {
-            0x00 => {
-                println!("[debug] Handshake");
-                let packet = parse_handshake(&data[offset..]);
-
-                println!("[debug] Sending response...");
-                let status =
-                    json::Status::new("1.21.8", packet.protocol_version(), 20, 0, "Hello, World!");
-                let status_json = status.json();
-
-                let packet_len = write_varint(
-                    varint_size(status_json.len() as u32) + 1 + status_json.len() as u32,
-                );
-                stream.write_all(&packet_len).unwrap();
-                stream.write_all(&[0x00]).unwrap();
-                let status_len = write_varint(status_json.len() as u32);
-                stream.write_all(&status_len).unwrap();
-                stream.write_all(status_json.as_bytes()).unwrap();
-
-                packet
-            }
-            _ => {
-                println!("[debug] Not implemented");
-                Packet {
-                    protocol_version: 0,
-                    server_address: String::from("undefined"),
-                    server_port: 25565,
-                    intent: ClientIntent::Error,
-                }
-            }
-        }
+    pub fn id(&self) -> u32 {
+        self.id
     }
 
     pub fn protocol_version(&self) -> u32 {
@@ -86,12 +48,95 @@ impl Packet {
             ClientIntent::Error => "Error",
         }
     }
+
+    pub fn length(&self) -> usize {
+        self.length
+    }
+
+    pub fn new() -> Self {
+        Self {
+            id: 0,
+            protocol_version: 0,
+            server_address: String::new(),
+            server_port: 0,
+            intent: ClientIntent::Error,
+            length: 0,
+        }
+    }
+
+    pub fn parse(conn: &mut MinecraftConnection) -> Option<Self> {
+        print_hex(&conn.buffer, conn.length);
+        let mut offset = 0;
+
+        let (packet_length, off) = read_varint(&conn.buffer);
+        println!("[debug] Packet len: {packet_length}");
+        offset += off;
+
+        let (packet_id, off) = read_varint(&conn.buffer[offset..]);
+        println!("[debug] Packet id: {:#x}", packet_id);
+        offset += off;
+
+        match packet_id {
+            0x00 => {
+                /* Status Request */
+                if packet_length == 1 {
+                    println!("[debug] Status Request");
+                    conn.bytes_read += packet_length as usize + 1;
+
+                    println!("[debug] Sending response...");
+                    let status = json::Status::new(
+                        "1.21.8",
+                        conn.last_packet.protocol_version(),
+                        20,
+                        0,
+                        "Hello, World!",
+                    );
+                    let status_json = status.json();
+
+                    let packet_len = write_varint(
+                        varint_size(status_json.len() as u32) + 1 + status_json.len() as u32,
+                    );
+                    conn.connection.write_all(&packet_len).unwrap();
+                    conn.connection.write_all(&[0x00]).unwrap();
+                    let status_len = write_varint(status_json.len() as u32);
+                    conn.connection.write_all(&status_len).unwrap();
+                    conn.connection.write_all(status_json.as_bytes()).unwrap();
+
+                    return None;
+                }
+
+                /* Handshake */
+                println!("[debug] Handshake");
+                let mut packet = parse_handshake(&conn.buffer[offset..], packet_id);
+                packet.length = packet_length as usize;
+                conn.bytes_read += packet_length as usize + 1;
+                conn.last_packet = packet.clone();
+
+                Some(packet)
+            }
+            0x01 => {
+                /* Handle Login */
+                None
+            }
+            _ => {
+                println!("[debug] Not implemented");
+                Some(Packet {
+                    id: 0,
+                    protocol_version: 0,
+                    server_address: String::from("undefined"),
+                    server_port: 25565,
+                    intent: ClientIntent::Error,
+                    length: 0,
+                })
+            }
+        }
+    }
 }
 
-fn print_hex(data: &[u8]) {
+fn print_hex(data: &[u8], length: usize) {
     println!("[debug] Packet:");
-    for b in data {
-        print!("{:#x} ", *b);
+    for i in 0..length {
+        print!("{:#x} ", data[i]);
     }
     println!();
 }
@@ -153,7 +198,7 @@ fn write_varint(mut value: u32) -> Vec<u8> {
     buffer
 }
 
-fn parse_handshake(data: &[u8]) -> Packet {
+fn parse_handshake(data: &[u8], id: u32) -> Packet {
     let mut offset = 0;
 
     let (protocol_version, off) = read_varint(data);
@@ -181,9 +226,11 @@ fn parse_handshake(data: &[u8]) -> Packet {
     };
 
     Packet {
+        id,
         protocol_version,
         server_address,
         server_port,
         intent,
+        length: 0,
     }
 }
