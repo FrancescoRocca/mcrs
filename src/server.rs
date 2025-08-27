@@ -1,10 +1,12 @@
-use std::{
-    io::Read,
-    net::{TcpListener, TcpStream},
-    os::fd::AsRawFd,
-};
+use std::collections::HashMap;
+use std::io::Read;
+
+use mio::net::{TcpListener, TcpStream};
+use mio::{Events, Interest, Poll, Token};
 
 use crate::packets::{self};
+
+const SERVER: Token = Token(0);
 
 pub struct Server {
     host: String,
@@ -12,8 +14,11 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(host: String, port: String) -> Self {
-        Server { host, port }
+    pub fn new(host: &str, port: &str) -> Self {
+        Server {
+            host: host.to_string(),
+            port: port.to_string(),
+        }
     }
 
     pub fn host(&self) -> &String {
@@ -24,11 +29,11 @@ impl Server {
         &self.port
     }
 
-    fn handle_client(&self, mut stream: TcpStream) {
+    fn handle_client_data(&self, stream: &mut TcpStream) {
         let mut buffer: Vec<u8> = vec![0u8; 1024];
         let n = stream.read(&mut buffer).unwrap();
         println!("Read {n} bytes");
-        let packet = packets::Packet::parse(&mut stream, &buffer[..n]);
+        let packet = packets::Packet::parse(stream, &buffer[..n]);
 
         println!(
             "{}:{} (proto v:{}, intent: {})",
@@ -39,19 +44,63 @@ impl Server {
         );
     }
 
+    fn handle_new_client(
+        &self,
+        server: &mut TcpListener,
+        poll: &mut Poll,
+        connections: &mut HashMap<Token, TcpStream>,
+        unique_token: &mut usize,
+    ) {
+        let (mut connection, addr) = server.accept().unwrap();
+        println!("New client: {}", addr);
+
+        let token = Token(*unique_token);
+        *unique_token += 1;
+
+        poll.registry()
+            .register(&mut connection, token, Interest::READABLE)
+            .unwrap();
+
+        connections.insert(token, connection);
+    }
+
     pub fn run(&self) {
-        let listener = TcpListener::bind(format!("{}:{}", self.host, self.port)).unwrap();
+        /* Create a new poll instance */
+        let mut poll = Poll::new().unwrap();
+        let mut events = Events::with_capacity(128);
+
+        let addr = format!("{}:{}", self.host, self.port).parse().unwrap();
+        let mut server = TcpListener::bind(addr).unwrap();
+
+        /* Start listening for incoming connections */
+        poll.registry()
+            .register(&mut server, SERVER, Interest::READABLE)
+            .unwrap();
+
+        /* A counter is ok for now, using fd would be better */
+        let mut unique_token = 1;
+        let mut connections: HashMap<Token, TcpStream> = HashMap::new();
 
         /* Accept connections and process them */
         loop {
-            match listener.accept() {
-                Ok((socket, addr)) => {
-                    let client_fd = socket.as_raw_fd();
-                    println!("Socket: {}, Addr: {}", client_fd, addr);
-                    self.handle_client(socket);
-                }
-                Err(e) => {
-                    println!("Couldn't get client: {e:?}");
+            poll.poll(&mut events, None).unwrap();
+
+            for event in events.iter() {
+                match event.token() {
+                    SERVER => {
+                        /* Accept connection */
+                        self.handle_new_client(
+                            &mut server,
+                            &mut poll,
+                            &mut connections,
+                            &mut unique_token,
+                        );
+                    }
+                    token => {
+                        /* Handle client data */
+                        let conn = connections.get_mut(&token).unwrap();
+                        self.handle_client_data(conn);
+                    }
                 }
             }
         }
