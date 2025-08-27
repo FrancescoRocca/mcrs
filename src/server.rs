@@ -52,16 +52,10 @@ impl MinecraftConnection {
     }
 
     pub fn next_packet(&mut self) -> Option<Packet> {
-        match self.read_data() {
-            Ok(bytes) => {
-                self.length = bytes;
-                if bytes == 0 {
-                    return None;
-                }
-                Packet::parse(self)
-            }
-            Err(_) => None,
+        if self.length == 0 {
+            return None;
         }
+        Packet::parse(self)
     }
 }
 
