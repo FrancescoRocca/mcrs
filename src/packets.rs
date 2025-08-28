@@ -2,12 +2,24 @@ use std::io::Write;
 
 use crate::{json, server::MinecraftConnection, utils};
 
-#[derive(Clone)]
 pub enum ClientIntent {
-    Status = 0,
-    Login = 1,
-    Transfer = 2,
-    Error = 4,
+    Status,
+    Login,
+    Transfer,
+    Error,
+    None,
+}
+
+impl ClientIntent {
+    pub fn as_str(&self) -> &str {
+        match self {
+            ClientIntent::Status => "Status",
+            ClientIntent::Login => "Login",
+            ClientIntent::Transfer => "Transfer",
+            ClientIntent::Error => "Error",
+            ClientIntent::None => "None",
+        }
+    }
 }
 
 pub enum Packet {
@@ -19,15 +31,11 @@ pub enum Packet {
         intent: ClientIntent,
         length: usize,
     },
-    // Status?
-    Ping {
-        id: u32,
-        payload: Vec<u8>,
-    },
+    None,
 }
 
 impl Packet {
-    pub fn parse(conn: &mut MinecraftConnection) -> Option<Self> {
+    pub fn parse(conn: &mut MinecraftConnection) -> Self {
         print_hex(&conn.buffer, conn.length);
         let mut offset = 0;
 
@@ -49,7 +57,7 @@ impl Packet {
                     println!("[debug] Status Request ({} bytes)", conn.bytes_read);
                     send_status(conn);
 
-                    return None;
+                    return Packet::None;
                 }
 
                 /* Handshake */
@@ -59,10 +67,10 @@ impl Packet {
                 println!("[debug] Handshake ({} bytes)", conn.bytes_read);
                 //conn.last_packet = packet;
 
-                Some(packet)
+                packet
             }
             0x01 => {
-                /*match conn.last_packet.intent {
+                match conn.intent {
                     ClientIntent::Status => {
                         /* Ping */
                         conn.bytes_read += conn.length;
@@ -70,13 +78,13 @@ impl Packet {
                         send_ping(conn);
                     }
                     _ => {}
-                }*/
+                }
 
-                None
+                Packet::None
             }
             _ => {
                 println!("[debug] Not implemented");
-                None
+                Packet::None
             }
         }
     }

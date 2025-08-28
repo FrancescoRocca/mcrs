@@ -5,7 +5,7 @@ use mio::event::Event;
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 
-use crate::packets::Packet;
+use crate::packets::{ClientIntent, Packet};
 
 const SERVER: Token = Token(0);
 
@@ -14,6 +14,7 @@ pub struct MinecraftConnection {
     pub buffer: Vec<u8>,
     pub length: usize,
     pub bytes_read: usize,
+    pub intent: ClientIntent,
 }
 
 impl MinecraftConnection {
@@ -23,6 +24,7 @@ impl MinecraftConnection {
             buffer: vec![0u8; 1024],
             length: 0,
             bytes_read: 0,
+            intent: ClientIntent::None,
         }
     }
 
@@ -50,9 +52,9 @@ impl MinecraftConnection {
         }
     }
 
-    pub fn next_packet(&mut self) -> Option<Packet> {
+    pub fn next_packet(&mut self) -> Packet {
         if self.length == 0 {
-            return None;
+            return Packet::None;
         }
         Packet::parse(self)
     }
@@ -90,15 +92,35 @@ impl MinecraftServer {
         &self.port
     }
 
-    fn handle_client_data(
-        &self,
-        minecraft_connection: &mut MinecraftConnection,
-    ) -> Result<(), Error> {
+    fn handle_client_data(minecraft_connection: &mut MinecraftConnection) -> Result<(), Error> {
         match minecraft_connection.read_data() {
             Ok(n) => {
                 minecraft_connection.length = n;
 
-                let _packet = minecraft_connection.next_packet();
+                let packet = minecraft_connection.next_packet();
+                match packet {
+                    Packet::Handshake {
+                        id,
+                        protocol_version,
+                        server_address,
+                        server_port,
+                        intent,
+                        length,
+                    } => {
+                        println!(
+                            "id: {:#x}, proto: {}, {}:{}, intent: {}, len: {}",
+                            id,
+                            protocol_version,
+                            server_address,
+                            server_port,
+                            intent.as_str(),
+                            length
+                        );
+                    }
+                    Packet::None => {
+                        println!("Packet empty");
+                    }
+                }
                 Ok(())
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
@@ -123,17 +145,16 @@ impl MinecraftServer {
     }
 
     pub fn run(&mut self) -> std::io::Result<()> {
-        /* Create a new poll instance */
-        let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(128);
 
         /* Start listening for incoming connections */
-        poll.registry()
+        self.poll
+            .registry()
             .register(&mut self.server, SERVER, Interest::READABLE)?;
 
         /* Accept connections and process them */
         loop {
-            poll.poll(&mut events, None).unwrap();
+            self.poll.poll(&mut events, None).unwrap();
 
             for event in events.iter() {
                 self.handle_event(event);
@@ -151,7 +172,7 @@ impl MinecraftServer {
                 /* Handle client data */
                 let should_remove = {
                     let conn = self.connections.get_mut(&token).unwrap();
-                    self.handle_client_data(conn).is_err()
+                    MinecraftServer::handle_client_data(conn).is_err()
                 };
 
                 if should_remove {
