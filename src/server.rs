@@ -71,29 +71,8 @@ impl MinecraftServer {
 
             println!("Read {} bytes", n);
             mc.length = n;
-            let packet = mc.next_packet().await;
+            let _packet = mc.next_packet().await;
             println!("Bytes read: {}", mc.bytes_read);
-            match packet {
-                Packet::Handshake {
-                    id,
-                    protocol_version,
-                    server_address,
-                    server_port,
-                    intent,
-                    length,
-                } => {
-                    println!(
-                        "id: {}, proto: {}, {}:{}, intent: {}, len: {}",
-                        id,
-                        protocol_version,
-                        server_address,
-                        server_port,
-                        intent.as_str(),
-                        length
-                    );
-                }
-                _ => {}
-            }
 
             if mc.bytes_read == n {
                 mc.bytes_read = 0;
