@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Error, ErrorKind, Read};
+use std::io::{ErrorKind, Read, Result};
 
 use mio::event::Event;
 use mio::net::{TcpListener, TcpStream};
@@ -30,11 +30,11 @@ impl MinecraftConnection {
         }
     }
 
-    pub fn read_data(&mut self) -> Result<usize, String> {
+    pub fn read_data(&mut self) -> Result<usize> {
         loop {
             match self.connection.read(&mut self.buffer) {
                 Ok(0) => {
-                    return Err("Connection closed".to_string());
+                    return Err(ErrorKind::UnexpectedEof.into());
                 }
                 Ok(n) => {
                     return Ok(n);
@@ -48,7 +48,7 @@ impl MinecraftConnection {
                         return Ok(0);
                     }
 
-                    return Err(e.to_string());
+                    return Err(e);
                 }
             }
         }
@@ -94,7 +94,7 @@ impl MinecraftServer {
         &self.port
     }
 
-    fn handle_client_data(minecraft_connection: &mut MinecraftConnection) -> Result<(), Error> {
+    fn handle_client_data(minecraft_connection: &mut MinecraftConnection) -> Result<()> {
         match minecraft_connection.read_data() {
             Ok(n) => {
                 minecraft_connection.length = n;
@@ -140,25 +140,44 @@ impl MinecraftServer {
                 }
                 Ok(())
             }
-            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+            Err(e) => Err(e),
         }
     }
 
-    fn handle_new_client(&mut self) {
-        let (mut connection, addr) = self.server.accept().unwrap();
-        println!("New client: {}", addr);
+    fn handle_new_client(&mut self) -> Result<()> {
+        loop {
+            match self.server.accept() {
+                Ok((mut connection, addr)) => {
+                    println!("New client: {}", addr);
 
-        let token = Token(self.unique_token);
-        self.unique_token += 1;
+                    let token = Token(self.unique_token);
+                    self.unique_token += 1;
 
-        self.poll
-            .registry()
-            .register(&mut connection, token, Interest::READABLE)
-            .unwrap();
+                    if let Err(e) =
+                        self.poll
+                            .registry()
+                            .register(&mut connection, token, Interest::READABLE)
+                    {
+                        eprintln!("[error] Failed to register client {:?}: {}", token, e);
+                        continue;
+                    }
 
-        let minecraft_connection = MinecraftConnection::new(connection);
+                    let minecraft_connection = MinecraftConnection::new(connection);
+                    self.connections.insert(token, minecraft_connection);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    break;
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
 
-        self.connections.insert(token, minecraft_connection);
+        Ok(())
     }
 
     pub fn run(&mut self) -> std::io::Result<()> {
@@ -171,37 +190,38 @@ impl MinecraftServer {
 
         /* Accept connections and process them */
         loop {
-            self.poll.poll(&mut events, None).unwrap();
+            self.poll.poll(&mut events, None)?;
 
             for event in events.iter() {
-                self.handle_event(event);
+                if let Err(e) = self.handle_event(event) {
+                    eprintln!("[error] Event handling failed: {}", e);
+                }
             }
         }
     }
 
-    fn handle_event(&mut self, event: &Event) {
+    fn handle_event(&mut self, event: &Event) -> Result<()> {
         match event.token() {
             SERVER => {
-                /* Accept connection */
-                self.handle_new_client();
+                self.handle_new_client()?;
             }
             token => {
-                /* Handle client data */
-                let should_remove = {
-                    let conn = self.connections.get_mut(&token).unwrap();
-                    MinecraftServer::handle_client_data(conn).is_err()
-                };
+                if let Some(conn) = self.connections.get_mut(&token) {
+                    let should_remove = MinecraftServer::handle_client_data(conn).is_err();
 
-                if should_remove {
-                    println!("Removing connection for token {:?}", token);
-                    if let Some(mut conn) = self.connections.remove(&token) {
-                        self.poll
-                            .registry()
-                            .deregister(&mut conn.connection)
-                            .unwrap();
+                    if should_remove {
+                        println!("Removing connection for token {:?}", token);
+                        if let Some(mut conn) = self.connections.remove(&token) {
+                            if let Err(e) = self.poll.registry().deregister(&mut conn.connection) {
+                                eprintln!("[warn] Failed to deregister {:?}: {}", token, e);
+                            }
+                        }
                     }
+                } else {
+                    eprintln!("[warn] Event for unknown token {:?}", token);
                 }
             }
         }
+        Ok(())
     }
 }

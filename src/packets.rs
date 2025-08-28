@@ -109,8 +109,8 @@ impl Packet {
 
 fn print_hex(data: &[u8], length: usize) {
     println!("[debug] Packet:");
-    for i in 0..length {
-        print!("{:#x} ", data[i]);
+    for b in data.iter().take(length) {
+        print!("{:#x} ", b);
     }
     println!();
 }
@@ -130,16 +130,14 @@ fn parse_handshake(
 
     let (address_len, off) = utils::read_varint(&data[offset..]);
     offset += off;
-    let mut server_address = String::new();
-    for x in 0..address_len {
-        server_address.push(data[offset + (x as usize)] as char);
-    }
-    offset += address_len as usize;
+    let addr_end = offset + address_len as usize;
+    let server_address = std::str::from_utf8(&data[offset..addr_end])
+        .unwrap_or("")
+        .to_string();
+    offset = addr_end;
 
-    let mut server_port: u16 = (data[offset] as u16) << 8;
-    offset = offset + 1;
-    server_port |= data[offset] as u16;
-    offset += 1;
+    let server_port = u16::from_be_bytes([data[offset], data[offset + 1]]);
+    offset += 2;
 
     let (intent, _) = utils::read_varint(&data[offset..]);
     let intent = match intent {
