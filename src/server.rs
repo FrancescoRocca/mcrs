@@ -14,6 +14,7 @@ pub struct MinecraftConnection {
     pub buffer: Vec<u8>,
     pub length: usize,
     pub bytes_read: usize,
+    pub protocol_version: u32,
     pub intent: ClientIntent,
 }
 
@@ -24,6 +25,7 @@ impl MinecraftConnection {
             buffer: vec![0u8; 1024],
             length: 0,
             bytes_read: 0,
+            protocol_version: 0,
             intent: ClientIntent::None,
         }
     }
@@ -96,29 +98,44 @@ impl MinecraftServer {
         match minecraft_connection.read_data() {
             Ok(n) => {
                 minecraft_connection.length = n;
+                minecraft_connection.bytes_read = 0;
+                println!("Read {} bytes", n);
 
-                let packet = minecraft_connection.next_packet();
-                match packet {
-                    Packet::Handshake {
-                        id,
-                        protocol_version,
-                        server_address,
-                        server_port,
-                        intent,
-                        length,
-                    } => {
-                        println!(
-                            "id: {:#x}, proto: {}, {}:{}, intent: {}, len: {}",
+                loop {
+                    let packet = minecraft_connection.next_packet();
+                    match packet {
+                        Packet::Handshake {
                             id,
                             protocol_version,
                             server_address,
                             server_port,
-                            intent.as_str(),
-                            length
-                        );
+                            intent,
+                            length,
+                        } => {
+                            println!("Handshake packet");
+                            println!(
+                                "id: {:#x}, proto: {}, {}:{}, intent: {}, len: {}",
+                                id,
+                                protocol_version,
+                                server_address,
+                                server_port,
+                                intent.as_str(),
+                                length
+                            );
+                        }
+                        Packet::Status => {
+                            println!("Status packet");
+                        }
+                        Packet::Ping => {
+                            println!("Ping packet");
+                        }
+                        Packet::None => {
+                            println!("Packet None");
+                        }
                     }
-                    Packet::None => {
-                        println!("Packet empty");
+
+                    if minecraft_connection.bytes_read == n {
+                        break;
                     }
                 }
                 Ok(())
