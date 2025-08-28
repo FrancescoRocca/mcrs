@@ -1,4 +1,6 @@
-use std::io::Write;
+use tokio::io::AsyncWriteExt;
+
+use std::io::Error;
 
 use crate::{json, server::MinecraftConnection, utils};
 
@@ -38,7 +40,7 @@ pub enum Packet {
 }
 
 impl Packet {
-    pub fn parse(conn: &mut MinecraftConnection) -> Self {
+    pub async fn parse(conn: &mut MinecraftConnection) -> Self {
         let start = conn.bytes_read;
         let available = conn.length - start;
         if available == 0 {
@@ -60,7 +62,9 @@ impl Packet {
                 /* Status Request */
                 if packet_length == 1 {
                     conn.bytes_read += advance;
-                    send_status(conn);
+                    if let Err(e) = send_status(conn).await {
+                        eprintln!("Error while sending status request: {}", e);
+                    }
 
                     return Packet::Status;
                 }
@@ -85,11 +89,17 @@ impl Packet {
                 match conn.intent {
                     ClientIntent::Status => {
                         /* Ping */
-                        let packet_start = start;
-                        send_ping(conn, packet_start, advance);
                         conn.bytes_read += advance;
+                        let packet_start = start;
+                        if let Err(e) = send_ping(conn, packet_start, advance).await {
+                            eprintln!("Error while sending ping: {}", e);
+                            return Packet::None;
+                        }
 
                         return Packet::Ping;
+                    }
+                    ClientIntent::Login => {
+                        println!("TODO: make Login");
                     }
                     _ => {
                         conn.bytes_read += advance;
@@ -159,13 +169,19 @@ fn parse_handshake(
     }
 }
 
-pub fn send_ping(conn: &mut MinecraftConnection, packet_start: usize, packet_len: usize) {
+pub async fn send_ping(
+    conn: &mut MinecraftConnection,
+    packet_start: usize,
+    packet_len: usize,
+) -> Result<(), Error> {
     let end = packet_start + packet_len;
     let slice = &conn.buffer[packet_start..end];
-    conn.connection.write_all(slice).unwrap();
+    conn.connection.write_all(slice).await?;
+
+    Ok(())
 }
 
-pub fn send_status(conn: &mut MinecraftConnection) {
+pub async fn send_status(conn: &mut MinecraftConnection) -> Result<(), Error> {
     println!("[debug] Sending response...");
     let status = json::Status::new("1.21.8", conn.protocol_version, 20, 0, "Hello, World!");
     let status_json = status.json();
@@ -173,9 +189,11 @@ pub fn send_status(conn: &mut MinecraftConnection) {
     let packet_len = utils::write_varint(
         utils::varint_size(status_json.len() as u32) + 1 + status_json.len() as u32,
     );
-    conn.connection.write_all(&packet_len).unwrap();
-    conn.connection.write_all(&[0x00]).unwrap();
+    conn.connection.write_all(&packet_len).await?;
+    conn.connection.write_all(&[0x00]).await?;
     let status_len = utils::write_varint(status_json.len() as u32);
-    conn.connection.write_all(&status_len).unwrap();
-    conn.connection.write_all(status_json.as_bytes()).unwrap();
+    conn.connection.write_all(&status_len).await?;
+    conn.connection.write_all(status_json.as_bytes()).await?;
+
+    Ok(())
 }

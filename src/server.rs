@@ -1,13 +1,9 @@
-use std::collections::HashMap;
-use std::io::{ErrorKind, Read, Result};
+use std::io::Result;
 
-use mio::event::Event;
-use mio::net::{TcpListener, TcpStream};
-use mio::{Events, Interest, Poll, Token};
+use tokio::io::AsyncReadExt;
+use tokio::net::{TcpListener, TcpStream};
 
 use crate::packets::{ClientIntent, Packet};
-
-const SERVER: Token = Token(0);
 
 pub struct MinecraftConnection {
     pub connection: TcpStream,
@@ -30,59 +26,24 @@ impl MinecraftConnection {
         }
     }
 
-    pub fn read_data(&mut self) -> Result<usize> {
-        loop {
-            match self.connection.read(&mut self.buffer) {
-                Ok(0) => {
-                    return Err(ErrorKind::UnexpectedEof.into());
-                }
-                Ok(n) => {
-                    return Ok(n);
-                }
-                Err(e) => {
-                    if e.kind() == ErrorKind::Interrupted {
-                        continue;
-                    }
-
-                    if e.kind() == ErrorKind::WouldBlock {
-                        return Ok(0);
-                    }
-
-                    return Err(e);
-                }
-            }
-        }
-    }
-
-    pub fn next_packet(&mut self) -> Packet {
+    pub async fn next_packet(&mut self) -> Packet {
         if self.length == 0 {
             return Packet::None;
         }
-        Packet::parse(self)
+        Packet::parse(self).await
     }
 }
 
 pub struct MinecraftServer {
     host: String,
     port: String,
-    server: TcpListener,
-    poll: Poll,
-    connections: HashMap<Token, MinecraftConnection>,
-    /* A counter is ok for now, using fd would be better */
-    unique_token: usize,
 }
 
 impl MinecraftServer {
     pub fn new(host: &str, port: &str) -> Self {
-        let addr = format!("{}:{}", host, port).parse().unwrap();
-        /* TODO: improve error handling */
         Self {
             host: host.to_string(),
             port: port.to_string(),
-            server: TcpListener::bind(addr).unwrap(),
-            poll: Poll::new().unwrap(),
-            connections: HashMap::new(),
-            unique_token: 1,
         }
     }
 
@@ -94,134 +55,65 @@ impl MinecraftServer {
         &self.port
     }
 
-    fn handle_client_data(minecraft_connection: &mut MinecraftConnection) -> Result<()> {
-        match minecraft_connection.read_data() {
-            Ok(n) => {
-                minecraft_connection.length = n;
-                minecraft_connection.bytes_read = 0;
-                println!("Read {} bytes", n);
-
-                loop {
-                    let packet = minecraft_connection.next_packet();
-                    match packet {
-                        Packet::Handshake {
-                            id,
-                            protocol_version,
-                            server_address,
-                            server_port,
-                            intent,
-                            length,
-                        } => {
-                            println!("Handshake packet");
-                            println!(
-                                "id: {:#x}, proto: {}, {}:{}, intent: {}, len: {}",
-                                id,
-                                protocol_version,
-                                server_address,
-                                server_port,
-                                intent.as_str(),
-                                length
-                            );
-                        }
-                        Packet::Status => {
-                            println!("Status packet");
-                        }
-                        Packet::Ping => {
-                            println!("Ping packet");
-                        }
-                        Packet::None => {
-                            println!("Packet None");
-                        }
-                    }
-
-                    if minecraft_connection.bytes_read == n {
-                        break;
-                    }
-                }
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    fn handle_new_client(&mut self) -> Result<()> {
+    async fn handle_client_data(mc: &mut MinecraftConnection) {
         loop {
-            match self.server.accept() {
-                Ok((mut connection, addr)) => {
-                    println!("New client: {}", addr);
-
-                    let token = Token(self.unique_token);
-                    self.unique_token += 1;
-
-                    if let Err(e) =
-                        self.poll
-                            .registry()
-                            .register(&mut connection, token, Interest::READABLE)
-                    {
-                        eprintln!("[error] Failed to register client {:?}: {}", token, e);
-                        continue;
-                    }
-
-                    let minecraft_connection = MinecraftConnection::new(connection);
-                    self.connections.insert(token, minecraft_connection);
+            let n = match mc.connection.read(&mut mc.buffer).await {
+                Ok(0) => {
+                    println!("Client disconnected");
+                    return;
                 }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    break;
-                }
-                Err(e) if e.kind() == ErrorKind::Interrupted => {
-                    continue;
-                }
+                Ok(n) => n,
                 Err(e) => {
-                    return Err(e);
+                    eprintln!("Read error: {}", e);
+                    return;
                 }
+            };
+
+            println!("Read {} bytes", n);
+            mc.length = n;
+            let packet = mc.next_packet().await;
+            println!("Bytes read: {}", mc.bytes_read);
+            match packet {
+                Packet::Handshake {
+                    id,
+                    protocol_version,
+                    server_address,
+                    server_port,
+                    intent,
+                    length,
+                } => {
+                    println!(
+                        "id: {}, proto: {}, {}:{}, intent: {}, len: {}",
+                        id,
+                        protocol_version,
+                        server_address,
+                        server_port,
+                        intent.as_str(),
+                        length
+                    );
+                }
+                _ => {}
+            }
+
+            if mc.bytes_read == n {
+                mc.bytes_read = 0;
             }
         }
-
-        Ok(())
     }
 
-    pub fn run(&mut self) -> std::io::Result<()> {
-        let mut events = Events::with_capacity(128);
+    #[tokio::main]
+    pub async fn run(&mut self) -> Result<()> {
+        let addr: String = format!("{}:{}", self.host, self.port).parse().unwrap();
+        let listener = TcpListener::bind(addr).await?;
 
-        /* Start listening for incoming connections */
-        self.poll
-            .registry()
-            .register(&mut self.server, SERVER, Interest::READABLE)?;
-
-        /* Accept connections and process them */
         loop {
-            self.poll.poll(&mut events, None)?;
+            let (socket, addr) = listener.accept().await?;
+            println!("New client: {}", addr);
+            let mut mc = MinecraftConnection::new(socket);
 
-            for event in events.iter() {
-                if let Err(e) = self.handle_event(event) {
-                    eprintln!("[error] Event handling failed: {}", e);
-                }
-            }
+            tokio::spawn(async move {
+                MinecraftServer::handle_client_data(&mut mc).await;
+            });
         }
-    }
-
-    fn handle_event(&mut self, event: &Event) -> Result<()> {
-        match event.token() {
-            SERVER => {
-                self.handle_new_client()?;
-            }
-            token => {
-                if let Some(conn) = self.connections.get_mut(&token) {
-                    let should_remove = MinecraftServer::handle_client_data(conn).is_err();
-
-                    if should_remove {
-                        println!("Removing connection for token {:?}", token);
-                        if let Some(mut conn) = self.connections.remove(&token) {
-                            if let Err(e) = self.poll.registry().deregister(&mut conn.connection) {
-                                eprintln!("[warn] Failed to deregister {:?}: {}", token, e);
-                            }
-                        }
-                    }
-                } else {
-                    eprintln!("[warn] Event for unknown token {:?}", token);
-                }
-            }
-        }
-        Ok(())
     }
 }
