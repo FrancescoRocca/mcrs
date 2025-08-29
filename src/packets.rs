@@ -4,11 +4,9 @@ use tokio::io::AsyncWriteExt;
 use std::io::Error;
 use uuid::Uuid;
 
-use crate::{
-    json,
-    server::MinecraftConnection,
-    utils::{self, write_varint},
-};
+use crate::json;
+use crate::server::MinecraftConnection;
+use crate::utils;
 
 #[derive(Clone)]
 pub enum ClientIntent {
@@ -139,13 +137,8 @@ fn parse_handshake(
 
     let address_len = utils::read_varint(data);
 
-    let mut addr_bytes: Vec<u8> = Vec::new();
-
-    for _ in 0..address_len {
-        addr_bytes.push(data.get_u8());
-    }
-
-    let server_address = std::str::from_utf8(&addr_bytes).unwrap_or("").to_string();
+    let addr_bytes = data.split_to(address_len as usize);
+    let server_address = String::from_utf8_lossy(&addr_bytes).to_string();
     let server_port = u16::from_be_bytes([data.get_u8(), data.get_u8()]);
 
     let intent = utils::read_varint(data);
@@ -178,11 +171,8 @@ fn parse_login(data: &mut BytesMut, id: u32, length: usize) -> Packet {
 
     let name = std::str::from_utf8(&name_bytes).unwrap_or("").to_string();
 
-    let mut uuid_bytes: Vec<u8> = Vec::new();
-    for _ in 0..16 {
-        uuid_bytes.push(data.get_u8());
-    }
-    let uuid = Uuid::from_bytes(uuid_bytes.try_into().unwrap());
+    let uuid_bytes = data.split_to(16);
+    let uuid = Uuid::from_slice(&uuid_bytes).unwrap();
 
     Packet::Login {
         id,

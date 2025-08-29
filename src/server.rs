@@ -24,7 +24,7 @@ impl MinecraftConnection {
     }
 
     pub async fn next_packet(&mut self) -> Packet {
-        if self.buffer.len() == 0 {
+        if self.buffer.is_empty() {
             return Packet::None;
         }
         Packet::parse(self).await
