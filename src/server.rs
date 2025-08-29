@@ -1,3 +1,4 @@
+use bytes::BytesMut;
 use std::io::Result;
 
 use tokio::io::AsyncReadExt;
@@ -7,9 +8,7 @@ use crate::packets::{ClientIntent, Packet};
 
 pub struct MinecraftConnection {
     pub connection: TcpStream,
-    pub buffer: Vec<u8>,
-    pub length: usize,
-    pub bytes_read: usize,
+    pub buffer: BytesMut,
     pub protocol_version: u32,
     pub intent: ClientIntent,
 }
@@ -18,16 +17,14 @@ impl MinecraftConnection {
     pub fn new(connection: TcpStream) -> Self {
         Self {
             connection,
-            buffer: vec![0u8; 1024],
-            length: 0,
-            bytes_read: 0,
+            buffer: BytesMut::with_capacity(1024),
             protocol_version: 0,
             intent: ClientIntent::None,
         }
     }
 
     pub async fn next_packet(&mut self) -> Packet {
-        if self.length == 0 {
+        if self.buffer.len() == 0 {
             return Packet::None;
         }
         Packet::parse(self).await
@@ -57,7 +54,7 @@ impl MinecraftServer {
 
     async fn handle_client_data(mc: &mut MinecraftConnection) {
         loop {
-            let n = match mc.connection.read(&mut mc.buffer).await {
+            let n = match mc.connection.read_buf(&mut mc.buffer).await {
                 Ok(0) => {
                     println!("Client disconnected");
                     return;
@@ -70,12 +67,40 @@ impl MinecraftServer {
             };
 
             println!("Read {} bytes", n);
-            mc.length = n;
-            let _packet = mc.next_packet().await;
-            println!("Bytes read: {}", mc.bytes_read);
+            loop {
+                match mc.next_packet().await {
+                    Packet::Handshake {
+                        id,
+                        protocol_version,
+                        server_address,
+                        server_port,
+                        intent,
+                        length,
+                    } => {
+                        println!(
+                            "id: {}, proto: {}, {}:{}, intent: {}, len: {}",
+                            id,
+                            protocol_version,
+                            server_address,
+                            server_port,
+                            intent.as_str(),
+                            length
+                        );
+                    }
+                    Packet::Login {
+                        id,
+                        name,
+                        uuid,
+                        length,
+                    } => {
+                        println!("id: {} name: {} uuid: {} len: {}", id, name, uuid, length);
+                    }
+                    _ => {}
+                };
 
-            if mc.bytes_read == n {
-                mc.bytes_read = 0;
+                if mc.buffer.is_empty() {
+                    break;
+                }
             }
         }
     }

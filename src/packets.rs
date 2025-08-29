@@ -1,8 +1,14 @@
+use bytes::{Buf, BufMut, BytesMut};
 use tokio::io::AsyncWriteExt;
 
 use std::io::Error;
+use uuid::Uuid;
 
-use crate::{json, server::MinecraftConnection, utils};
+use crate::{
+    json,
+    server::MinecraftConnection,
+    utils::{self, write_varint},
+};
 
 #[derive(Clone)]
 pub enum ClientIntent {
@@ -36,32 +42,25 @@ pub enum Packet {
     },
     Status,
     Ping,
+    Login {
+        id: u32,
+        name: String,
+        uuid: Uuid,
+        length: usize,
+    },
     None,
 }
 
 impl Packet {
     pub async fn parse(conn: &mut MinecraftConnection) -> Self {
-        let start = conn.bytes_read;
-        let available = conn.length - start;
-        if available == 0 {
-            return Packet::None;
-        }
-        let buf = &conn.buffer[start..start + available];
+        print_hex(&conn.buffer, conn.buffer.len());
 
-        print_hex(buf, buf.len());
-
-        /* Packet length */
-        let (packet_length, len_len) = utils::read_varint(buf);
-
-        /* Packet id */
-        let (packet_id, id_len) = utils::read_varint(&buf[len_len..]);
-        let advance = len_len + packet_length as usize;
+        let (packet_length, packet_id) = parse_headers(&mut conn.buffer);
 
         match packet_id {
             0x00 => {
                 /* Status Request */
                 if packet_length == 1 {
-                    conn.bytes_read += advance;
                     if let Err(e) = send_status(conn).await {
                         eprintln!("Error while sending status request: {}", e);
                     }
@@ -69,47 +68,43 @@ impl Packet {
                     return Packet::Status;
                 }
 
-                /* Handshake */
-                let payload_start = len_len + id_len;
-                let payload_len = packet_length as usize - id_len;
-                let payload = &buf[payload_start..payload_start + payload_len];
-
-                let packet = parse_handshake(
-                    payload,
-                    packet_id,
-                    packet_length as usize,
-                    &mut conn.protocol_version,
-                    &mut conn.intent,
-                );
-                conn.bytes_read += advance;
-
-                packet
+                match conn.intent {
+                    ClientIntent::None => {
+                        /* Handshake */
+                        parse_handshake(
+                            &mut conn.buffer,
+                            packet_id,
+                            packet_length as usize,
+                            &mut conn.protocol_version,
+                            &mut conn.intent,
+                        )
+                    }
+                    ClientIntent::Login => {
+                        /* Login */
+                        parse_login(&mut conn.buffer, packet_id, packet_length as usize)
+                    }
+                    _ => Packet::None,
+                }
             }
             0x01 => {
                 match conn.intent {
                     ClientIntent::Status => {
                         /* Ping */
-                        conn.bytes_read += advance;
-                        let packet_start = start;
-                        if let Err(e) = send_ping(conn, packet_start, advance).await {
+                        if let Err(e) = send_ping(conn).await {
                             eprintln!("Error while sending ping: {}", e);
                             return Packet::None;
                         }
 
                         return Packet::Ping;
                     }
-                    ClientIntent::Login => {
-                        println!("TODO: make Login");
-                    }
                     _ => {
-                        conn.bytes_read += advance;
+                        eprintln!("Not implemented.");
                     }
                 }
 
                 Packet::None
             }
             _ => {
-                conn.bytes_read += advance;
                 println!("[debug] Not implemented");
                 Packet::None
             }
@@ -125,31 +120,35 @@ fn print_hex(data: &[u8], length: usize) {
     println!();
 }
 
+fn parse_headers(data: &mut BytesMut) -> (u32, u32) {
+    let packet_length = utils::read_varint(data);
+    let packet_id = utils::read_varint(data);
+
+    (packet_length, packet_id)
+}
+
 fn parse_handshake(
-    data: &[u8],
+    data: &mut BytesMut,
     id: u32,
     length: usize,
     cprotocol_version: &mut u32,
     next_intent: &mut ClientIntent,
 ) -> Packet {
-    let mut offset = 0;
-
-    let (protocol_version, off) = utils::read_varint(data);
+    let protocol_version = utils::read_varint(data);
     *cprotocol_version = protocol_version;
-    offset += off;
 
-    let (address_len, off) = utils::read_varint(&data[offset..]);
-    offset += off;
-    let addr_end = offset + address_len as usize;
-    let server_address = std::str::from_utf8(&data[offset..addr_end])
-        .unwrap_or("")
-        .to_string();
-    offset = addr_end;
+    let address_len = utils::read_varint(data);
 
-    let server_port = u16::from_be_bytes([data[offset], data[offset + 1]]);
-    offset += 2;
+    let mut addr_bytes: Vec<u8> = Vec::new();
 
-    let (intent, _) = utils::read_varint(&data[offset..]);
+    for _ in 0..address_len {
+        addr_bytes.push(data.get_u8());
+    }
+
+    let server_address = std::str::from_utf8(&addr_bytes).unwrap_or("").to_string();
+    let server_port = u16::from_be_bytes([data.get_u8(), data.get_u8()]);
+
+    let intent = utils::read_varint(data);
     let intent = match intent {
         0x01 => ClientIntent::Status,
         0x02 => ClientIntent::Login,
@@ -169,29 +168,55 @@ fn parse_handshake(
     }
 }
 
-pub async fn send_ping(
-    conn: &mut MinecraftConnection,
-    packet_start: usize,
-    packet_len: usize,
-) -> Result<(), Error> {
-    let end = packet_start + packet_len;
-    let slice = &conn.buffer[packet_start..end];
-    conn.connection.write_all(slice).await?;
+fn parse_login(data: &mut BytesMut, id: u32, length: usize) -> Packet {
+    let name_len = utils::read_varint(data);
+    let mut name_bytes: Vec<u8> = Vec::new();
+
+    for _ in 0..name_len {
+        name_bytes.push(data.get_u8());
+    }
+
+    let name = std::str::from_utf8(&name_bytes).unwrap_or("").to_string();
+
+    let mut uuid_bytes: Vec<u8> = Vec::new();
+    for _ in 0..16 {
+        uuid_bytes.push(data.get_u8());
+    }
+    let uuid = Uuid::from_bytes(uuid_bytes.try_into().unwrap());
+
+    Packet::Login {
+        id,
+        name,
+        uuid,
+        length,
+    }
+}
+
+pub async fn send_ping(conn: &mut MinecraftConnection) -> Result<(), Error> {
+    let packet_size = utils::write_varint(1 + 8);
+
+    let mut out = BytesMut::with_capacity(16);
+    out.put_slice(&packet_size);
+    out.put_u8(0x01);
+    out.put_slice(&conn.buffer[..8]);
+
+    conn.connection.write_all_buf(&mut out).await?;
+    conn.buffer.clear();
 
     Ok(())
 }
 
 pub async fn send_status(conn: &mut MinecraftConnection) -> Result<(), Error> {
-    println!("[debug] Sending response...");
     let status = json::Status::new("1.21.8", conn.protocol_version, 20, 0, "Hello, World!");
     let status_json = status.json();
 
     let packet_len = utils::write_varint(
         utils::varint_size(status_json.len() as u32) + 1 + status_json.len() as u32,
     );
+    let status_len = utils::write_varint(status_json.len() as u32);
+
     conn.connection.write_all(&packet_len).await?;
     conn.connection.write_all(&[0x00]).await?;
-    let status_len = utils::write_varint(status_json.len() as u32);
     conn.connection.write_all(&status_len).await?;
     conn.connection.write_all(status_json.as_bytes()).await?;
 
