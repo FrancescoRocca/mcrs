@@ -1,5 +1,6 @@
 mod json;
 mod packets;
+mod responses;
 mod server;
 mod utils;
 

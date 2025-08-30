@@ -65,3 +65,11 @@ pub fn write_varint(mut value: u32) -> Vec<u8> {
 
     buffer
 }
+
+pub fn print_hex(data: &[u8], length: usize) {
+    println!("[debug] Packet:");
+    for b in data.iter().take(length) {
+        print!("{:#x} ", b);
+    }
+    println!();
+}

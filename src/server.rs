@@ -5,6 +5,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::packets::{ClientIntent, Packet};
+use crate::responses;
 
 pub struct MinecraftConnection {
     pub connection: TcpStream,
@@ -27,7 +28,7 @@ impl MinecraftConnection {
         if self.buffer.is_empty() {
             return Packet::None;
         }
-        Packet::parse(self).await
+        Packet::parse(&mut self.buffer, &self.intent).await
     }
 }
 
@@ -52,9 +53,9 @@ impl MinecraftServer {
         &self.port
     }
 
-    async fn handle_client_data(mc: &mut MinecraftConnection) {
+    async fn handle_client_data(conn: &mut MinecraftConnection) {
         loop {
-            let n = match mc.connection.read_buf(&mut mc.buffer).await {
+            let n = match conn.connection.read_buf(&mut conn.buffer).await {
                 Ok(0) => {
                     println!("Client disconnected");
                     return;
@@ -68,37 +69,15 @@ impl MinecraftServer {
 
             println!("Read {} bytes", n);
             loop {
-                match mc.next_packet().await {
-                    Packet::Handshake {
-                        id,
-                        protocol_version,
-                        server_address,
-                        server_port,
-                        intent,
-                        length,
-                    } => {
-                        println!(
-                            "id: {}, proto: {}, {}:{}, intent: {}, len: {}",
-                            id,
-                            protocol_version,
-                            server_address,
-                            server_port,
-                            intent.as_str(),
-                            length
-                        );
+                let mut packet = conn.next_packet().await;
+                match responses::handle_packet(conn, &mut packet).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("{}", e)
                     }
-                    Packet::Login {
-                        id,
-                        name,
-                        uuid,
-                        length,
-                    } => {
-                        println!("id: {} name: {} uuid: {} len: {}", id, name, uuid, length);
-                    }
-                    _ => {}
-                };
+                }
 
-                if mc.buffer.is_empty() {
+                if conn.buffer.is_empty() {
                     break;
                 }
             }
