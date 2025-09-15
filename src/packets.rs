@@ -62,21 +62,16 @@ impl Packet {
             }
             ClientIntent::Status => {
                 if data.is_empty() {
-                    /* Ping */
                     Packet::Ping {
                         id: packet_id,
                         data: data.clone(),
                         length: packet_length as usize,
                     }
                 } else {
-                    /* Status */
                     Packet::Status
                 }
             }
-            ClientIntent::Login => {
-                /* Login */
-                Packet::parse_login(data, packet_length as usize, packet_id)
-            }
+            ClientIntent::Login => Packet::parse_login(data, packet_length as usize, packet_id),
             ClientIntent::Transfer => Packet::None,
             ClientIntent::Error => Packet::None,
         }

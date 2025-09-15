@@ -85,7 +85,7 @@ impl MinecraftServer {
     }
 
     #[tokio::main]
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         let addr: String = format!("{}:{}", self.host, self.port).parse().unwrap();
         let listener = TcpListener::bind(addr).await?;
 
